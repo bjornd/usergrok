@@ -17,6 +17,13 @@ user phrased it as a defect or a wish.
 
 Sample product: **Notion**. Sample source: **G2** reviews.
 
+[![UserGrok — pain-point themes clustered from Notion reviews](docs/screenshot.png)](https://bjornd.github.io/usergrok/)
+
+*Pain-point themes from 184 G2 reviews. Circles are the 80% HDBSCAN was fit on, diamonds
+the held-out 20% placed by `approximate_predict`, grey dots the quotes left unclustered.
+Themes are ranked by how many distinct reviewers raised them.*
+**[Try the live demo →](https://bjornd.github.io/usergrok/)**
+
 ---
 
 ## What it does
@@ -33,9 +40,9 @@ Sample product: **Notion**. Sample source: **G2** reviews.
    the held-out 20% is assigned with `hdbscan.approximate_predict` against the
    reloaded model. UMAP gives 2-D coordinates for the plot.
 5. **Label** (`05_label_clusters.py`) — the LLM names each cluster (label + summary).
-6. **Visualize** (`app/`) — per-category scatter of quotes, colored by cluster,
-   with the 20% predicted points drawn as hollow diamonds; a cluster panel with
-   LLM labels; hover + click for the quote and its source review.
+6. **Visualize** (`app/`) — per-category scatter of quotes, colored by cluster, with the
+   20% predicted points drawn as ring-outlined diamonds; a themes panel ranked by distinct
+   reviewers; hover + click for the quote and its source review.
 
 The LLM backend is the local, authenticated **`claude` CLI** (Claude Code) — no API
 key required (`pipeline/common.py` → `claude()`).
