@@ -81,6 +81,8 @@ you can stop and resume.
 
 ## Sharing a static demo (no backend, no database)
 
+**Live demo: https://bjornd.github.io/usergrok/**
+
 `static_site/` is a self-contained build of the app that reads plain JSON instead of the
 API — the whole thing is ~420 KB, so it can be zipped, committed, or dropped on any static
 host (GitHub Pages, S3, Netlify).
@@ -98,6 +100,9 @@ static_site/
     ├── pain_point.json   # clusters + every quote with its coords and assignment
     └── praise.json
 ```
+
+It is published by `.github/workflows/pages.yml` on every push to `main` (the repo's
+Pages source is set to *GitHub Actions*).
 
 The export calls the same functions the API serves rather than re-implementing their
 queries, so the static build can't silently drift from the live one. The page picks its
