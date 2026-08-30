@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "usergrok-app",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "app/run.py"
+      ],
+      "port": 8317,
+      "autoPort": true
+    },
+    {
+      "name": "usergrok-static",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "scripts/serve_static.py"
+      ],
+      "port": 8318,
+      "autoPort": true
+    }
+  ]
+}

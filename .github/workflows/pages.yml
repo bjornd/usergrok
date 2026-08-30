@@ -1,0 +1,36 @@
+name: Deploy static demo to GitHub Pages
+
+# Publishes static_site/ — the backend-free build produced by
+# pipeline/06_export_static.py. Regenerate and commit that folder to update the demo.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # enablement: true turns Pages on via the API, so no manual settings step is needed
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: static_site
+      - id: deployment
+        uses: actions/deploy-pages@v4

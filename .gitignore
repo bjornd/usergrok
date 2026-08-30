@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/html_cache/
+data/raw/chunk_*.json
+models/*.joblib
+.DS_Store
+
+# Supabase local volumes / temp
+supabase/.branches/
+supabase/.temp/

@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UserGrok — Feedback Analysis</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page:        #f9f9f7;
+    --surface:     #fcfcfb;
+    --text:        #0b0b0b;
+    --text-2:      #52514e;
+    --muted:       #898781;
+    --grid:        #e1e0d9;
+    --baseline:    #c3c2b7;
+    --border:      rgba(11,11,11,0.10);
+    --border-2:    rgba(11,11,11,0.06);
+    --accent:      #2a78d6;
+    /* categorical cluster hues (validated reference palette, light) */
+    --s1:#2a78d6; --s2:#008300; --s3:#e87ba4; --s4:#eda100;
+    --s5:#1baf7a; --s6:#eb6834; --s7:#4a3aa7; --s8:#e34948;
+    --s9:#6da7ec; --s10:#b06fb8;
+    --noise:#a6a49d; --warn:#b06a00;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      --page:#0d0d0d; --surface:#1a1a19; --text:#fff; --text-2:#c3c2b7;
+      --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+      --border:rgba(255,255,255,0.12); --border-2:rgba(255,255,255,0.06);
+      --accent:#3987e5;
+      --s1:#3987e5; --s2:#3fae3f; --s3:#d55181; --s4:#c98500;
+      --s5:#199e70; --s6:#d95926; --s7:#9085e9; --s8:#e66767;
+      --s9:#6da7ec; --s10:#c58fcc; --noise:#6f6d67; --warn:#e0a03a;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --page:#0d0d0d; --surface:#1a1a19; --text:#fff; --text-2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+    --border:rgba(255,255,255,0.12); --border-2:rgba(255,255,255,0.06);
+    --accent:#3987e5;
+    --s1:#3987e5; --s2:#3fae3f; --s3:#d55181; --s4:#c98500;
+    --s5:#199e70; --s6:#d95926; --s7:#9085e9; --s8:#e66767;
+    --s9:#6da7ec; --s10:#c58fcc; --noise:#6f6d67; --warn:#e0a03a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 22px 20px 60px; }
+
+  /* header */
+  header.top { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 24px; }
+  .brand h1 { margin: 0; font-size: 21px; letter-spacing: -0.01em; font-weight: 700; }
+  .brand .sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  .brand .dot { color: var(--accent); }
+  .tiles { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 14px; min-width: 92px; box-shadow: var(--shadow);
+  }
+  .tile .v { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+  /* pipeline strip */
+  .pipe {
+    margin: 18px 0 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: var(--text-2);
+  }
+  .pipe .step {
+    display: inline-flex; align-items: center; gap: 6px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; padding: 5px 11px;
+  }
+  .pipe .step b { color: var(--text); font-weight: 600; }
+  .pipe .arr { color: var(--muted); }
+
+  /* tabs */
+  .tabs { display: flex; gap: 6px; margin: 20px 0 14px; border-bottom: 1px solid var(--border); }
+  .tab {
+    appearance: none; border: 0; background: transparent; cursor: pointer;
+    padding: 9px 14px 11px; font: inherit; color: var(--text-2); font-weight: 600;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; display: flex; gap: 8px; align-items: center;
+  }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .badge {
+    font-size: 11px; font-weight: 700; color: var(--text-2); background: var(--page);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+  }
+  .tab[aria-selected="true"] .badge { color: #fff; background: var(--accent); border-color: transparent; }
+
+  /* layout */
+  .grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: var(--shadow);
+  }
+  .card .hd {
+    display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border-2);
+  }
+  .card .hd h2 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; color: var(--text-2); }
+  .card .hd .meta { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+  /* plot */
+  .plotwrap { position: relative; }
+  svg.plot { display: block; width: 100%; height: 540px; }
+  .pt { stroke: var(--surface); stroke-width: 1.5; cursor: pointer; transition: opacity .12s; }
+  .pt.dim { opacity: 0.12; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 16px 14px; border-top: 1px solid var(--border-2); font-size: 12px; color: var(--text-2); }
+  .legend .shape { display: inline-flex; align-items: center; gap: 6px; }
+  .legend svg { overflow: visible; }
+
+  /* tooltip */
+  .tip {
+    position: fixed; z-index: 30; max-width: 320px; pointer-events: none; opacity: 0;
+    transform: translateY(4px); transition: opacity .1s;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow); padding: 9px 11px; font-size: 12.5px; line-height: 1.45;
+  }
+  .tip .q { color: var(--text); }
+  .tip .m { color: var(--muted); margin-top: 5px; font-size: 11.5px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); font-weight: 600; }
+  .chip.train { color: var(--text-2); }
+  .chip.test { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+
+  /* cluster list */
+  .clusters { max-height: 596px; overflow: auto; padding: 6px; }
+  .cl {
+    display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: start;
+    padding: 10px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+  }
+  .cl:hover { background: var(--page); }
+  .cl.active { background: var(--page); border-color: var(--border); }
+  .cl .sw { width: 12px; height: 12px; border-radius: 4px; margin-top: 3px; border: 1px solid var(--border); }
+  .cl .lab { font-weight: 650; }
+  .cl .sm { color: var(--text-2); font-size: 12.5px; margin-top: 2px; }
+  .cl .rt { display: inline-block; margin-top: 5px; margin-right: 4px; font-size: 11px; font-weight: 600;
+            color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
+  .cl .rt.mx { color: var(--warn); border-color: color-mix(in oklab, var(--warn) 45%, transparent); }
+  .cl .ct { text-align: right; font-variant-numeric: tabular-nums; }
+  .cl .ct .n { font-weight: 700; }
+  .cl .ct .sp { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+  /* detail */
+  .detail { margin-top: 16px; }
+  .detail .body { padding: 14px 16px 16px; }
+  .detail .quote { font-size: 16px; line-height: 1.5; }
+  .detail .src { color: var(--text-2); margin-top: 10px; font-size: 13px; }
+  .detail .src .star { color: var(--s4); }
+  .placeholder { color: var(--muted); padding: 24px 16px; text-align: center; font-size: 13px; }
+  .runbar { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); padding: 10px 16px; border-top: 1px solid var(--border-2); }
+  .runbar b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); cursor: pointer; user-select: none; }
+  .toggle input { accent-color: var(--accent); }
+  .themebtn { appearance:none; border:1px solid var(--border); background:var(--surface); color:var(--text-2); border-radius:8px; padding:5px 10px; cursor:pointer; font:inherit; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>User<span class="dot">Grok</span></h1>
+      <div class="sub">What to fix first, and what to double down on — <b>Notion</b> reviews sampled from G2 · <span id="sub-note">clustered with HDBSCAN</span></div>
+    </div>
+    <div class="tiles" id="tiles"></div>
+  </header>
+
+  <div class="pipe">
+    <span class="step">📥 <b>G2 reviews</b></span><span class="arr">→</span>
+    <span class="step">🧠 <b>LLM</b> quote extraction</span><span class="arr">→</span>
+    <span class="step">🧭 384-d <b>embeddings</b></span><span class="arr">→</span>
+    <span class="step">🔗 <b>HDBSCAN</b> 80% + approximate_predict 20%</span><span class="arr">→</span>
+    <span class="step">🗄️ <b>Supabase</b></span>
+    <button class="themebtn" id="themebtn" title="Toggle theme" style="margin-left:auto">◑ theme</button>
+  </div>
+
+  <div class="tabs" id="tabs" role="tablist"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="hd">
+        <h2 id="plot-title">Themes</h2>
+        <label class="toggle" style="margin-left:auto"><input type="checkbox" id="showtest" checked> show predicted 20%</label>
+      </div>
+      <div class="plotwrap">
+        <svg class="plot" id="plot" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="runbar" id="runbar"></div>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2>Themes</h2><span class="meta" id="cl-meta"></span></div>
+      <div class="clusters" id="clusters"></div>
+    </div>
+  </div>
+
+  <div class="card detail">
+    <div class="hd"><h2>Selected quote</h2><span class="meta" id="detail-meta"></span></div>
+    <div class="body" id="detail"><div class="placeholder">Hover a point for a peek — click it to pin the quote and its source review here.</div></div>
+  </div>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+// Where the page reads its data. Defaults to the FastAPI backend; the static export
+// (pipeline/06_export_static.py) predefines window.USERGROK_SOURCES to point at plain
+// JSON files instead, so one page serves both the live app and the shareable build.
+const SOURCES = window.USERGROK_SOURCES || {
+  summary: '/api/summary',
+  category: cat => '/api/category/' + cat,
+};
+const CLUSTER_VARS = ['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8','--s9','--s10'];
+const state = { cat: null, data: null, activeCluster: null, showTest: true };
+
+const $ = s => document.querySelector(s);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function colorForCluster(cid, orderMap) {
+  if (cid < 0) return css('--noise');
+  const idx = orderMap.get(cid) ?? 0;
+  return css(CLUSTER_VARS[idx % CLUSTER_VARS.length]);
+}
+
+async function boot() {
+  const s = await (await fetch(SOURCES.summary)).json();
+  // tiles
+  const totalClusters = s.runs.reduce((a,r)=>a+(r.n_clusters||0),0);
+  $('#tiles').innerHTML = [
+    ['Reviews', s.reviews], ['Quotes', s.quotes], ['Themes', totalClusters],
+  ].map(([k,v])=>`<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+
+  // tabs
+  const runByCat = Object.fromEntries(s.runs.map(r=>[r.category, r]));
+  $('#tabs').innerHTML = s.categories.map((c,i)=>{
+    const n = s.quotes_by_category[c.key] ?? 0;
+    return `<button class="tab" role="tab" data-cat="${c.key}" aria-selected="${i===0}">
+      ${c.label}<span class="badge">${n}</span></button>`;
+  }).join('');
+  document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>selectTab(t.dataset.cat));
+
+  $('#showtest').onchange = e => { state.showTest = e.target.checked; render(); };
+  $('#themebtn').onclick = toggleTheme;
+  selectTab(s.categories[0].key);
+}
+
+function toggleTheme(){
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : (cur === 'light' ? 'dark' :
+    (matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark'));
+  document.documentElement.setAttribute('data-theme', next);
+  if (state.data) render();
+}
+
+async function selectTab(cat) {
+  state.cat = cat; state.activeCluster = null;
+  document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-selected', String(t.dataset.cat===cat)));
+  state.data = await (await fetch(SOURCES.category(cat))).json();
+  $('#plot-title').textContent = state.data.label + ' — themes';
+  render();
+}
+
+function render() {
+  const d = state.data;
+  if (!d) return;
+  const pts = d.points;
+  // cluster ordering: by size desc, assign color slots
+  const orderMap = new Map();
+  d.clusters.filter(c=>c.cluster_id>=0).forEach((c,i)=>orderMap.set(c.cluster_id, i));
+
+  renderClusters(d, orderMap);
+  renderRunbar(d);
+  renderLegend(orderMap, d);
+  renderPlot(pts, orderMap);
+}
+
+function renderRunbar(d){
+  const m = (d.run && d.run.metrics) || {};
+  const p = (d.run && d.run.params) || {};
+  $('#runbar').innerHTML = d.run ? [
+    `train <b>${m.n_train??'—'}</b> · 80%`,
+    `predicted <b>${m.n_test??'—'}</b> · 20% (approximate_predict)`,
+    `themes <b>${m.n_clusters??'—'}</b>`,
+    `coherence <b>${m.coherence!=null?m.coherence.toFixed(2):'—'}</b>`,
+    `unclustered <b>${m.noise_fraction!=null?Math.round(m.noise_fraction*100)+'%':'—'}</b>`,
+    `min_cluster_size <b>${p.min_cluster_size??'—'}</b>`,
+    `min_samples <b>${p.min_samples??'—'}</b>`,
+  ].map(x=>`<span>${x}</span>`).join('') : '<span>No clustering run for this category yet.</span>';
+}
+
+function renderLegend(orderMap, d){
+  // Only the mark encoding lives here. Repeating a colour swatch for 20+ themes made
+  // three rows of text that duplicated the Themes panel, which is the real colour key.
+  $('#legend').innerHTML =
+    `<span class="shape"><svg width="18" height="14"><circle cx="7" cy="7" r="5" fill="${css('--muted')}" stroke="${css('--surface')}" stroke-width="1.5"/></svg>training 80%</span>`+
+    `<span class="shape"><svg width="20" height="16"><path d="M9 1 L16 8 L9 15 L2 8 Z" fill="${css('--muted')}" stroke="${css('--text')}" stroke-width="1.6"/></svg>predicted 20% <span style="color:var(--muted)">(approximate_predict)</span></span>`+
+    `<span class="shape"><svg width="12" height="12"><circle cx="6" cy="6" r="4" fill="${css('--noise')}"/></svg>unclustered</span>`+
+    `<span style="color:var(--muted);margin-left:auto">colours match the Themes panel →</span>`;
+}
+
+function shortLabel(c){
+  if (c.cluster_id < 0) return 'Unclustered';
+  return c.label || ('Cluster '+c.cluster_id);
+}
+
+function renderClusters(d, orderMap){
+  const cont = $('#clusters');
+  $('#cl-meta').textContent = d.clusters.filter(c=>c.cluster_id>=0).length + ' found';
+  cont.innerHTML = d.clusters.map(c=>{
+    const col = colorForCluster(c.cluster_id, orderMap);
+    const active = state.activeCluster === c.cluster_id ? ' active':'';
+    const counts = countSplit(d.points, c.cluster_id);
+    // people, not quotes: the headline number is how many distinct reviewers raised it
+    const people = c.n_reviews!=null ? c.n_reviews : c.size;
+    const rating = c.cluster_id>=0 && c.avg_rating!=null
+      ? `<span class="rt" title="average rating of the reviews in this theme">★ ${c.avg_rating.toFixed(1)}</span>` : '';
+    // shown, not hidden: a theme the model itself judged to cover more than one concern
+    // should be discounted by the reader, not presented as if it were solid
+    const mixedBadge = c.mixed
+      ? `<span class="rt mx" title="The LLM judged this cluster to cover more than one concern — read it with caution">⚠ mixed concerns</span>` : '';
+    return `<div class="cl${active}" data-cid="${c.cluster_id}">
+      <span class="sw" style="background:${col}"></span>
+      <div><div class="lab">${esc(shortLabel(c))}</div>
+        ${c.summary?`<div class="sm">${esc(c.summary)}</div>`:''}
+        ${rating}${mixedBadge}</div>
+      <div class="ct"><div class="n">${people}</div><div class="sp">${c.cluster_id>=0?'reviewers':`${counts.train}+${counts.test}`}</div></div>
+    </div>`;
+  }).join('');
+  cont.querySelectorAll('.cl').forEach(el=>{
+    el.onclick = ()=>{
+      const cid = +el.dataset.cid;
+      state.activeCluster = state.activeCluster===cid ? null : cid;
+      render();
+    };
+  });
+}
+
+function countSplit(pts, cid){
+  let train=0,test=0;
+  for(const p of pts) if(p.cluster_id===cid){ p.split==='test'?test++:train++; }
+  return {train,test};
+}
+
+function renderPlot(pts, orderMap){
+  const svg = $('#plot');
+  const ink = css('--text');
+  const W = svg.clientWidth || 800, H = 540, pad = 26;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const shown = pts.filter(p=> state.showTest || p.split!=='test');
+  if(!shown.length){ svg.innerHTML=''; return; }
+  const xs = shown.map(p=>p.x), ys = shown.map(p=>p.y);
+  const xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(...ys), ymax=Math.max(...ys);
+  const sx = v => pad + (xmax===xmin?0.5:(v-xmin)/(xmax-xmin))*(W-2*pad);
+  const sy = v => pad + (ymax===ymin?0.5:(v-ymin)/(ymax-ymin))*(H-2*pad);
+
+  let out = '';
+  // draw noise first (under), then clustered, then test on top
+  const ordered = shown.slice().sort((a,b)=>{
+    const rank = p => (p.cluster_id<0?0:1) + (p.split==='test'?1:0);
+    return rank(a)-rank(b);
+  });
+  for(const p of ordered){
+    const col = colorForCluster(p.cluster_id, orderMap);
+    const dim = state.activeCluster!=null && p.cluster_id!==state.activeCluster ? ' dim':'';
+    const x = sx(p.x), y = sy(p.y);
+    const noise = p.cluster_id<0;
+    // shape encodes the split: circle = training 80%, diamond = held-out 20%
+    if(p.split==='test'){
+      // predicted (approximate_predict) — filled diamond, larger, with a high-contrast
+      // ink ring so the held-out 20% is unmistakable against the filled training dots.
+      const r=6.8;
+      out += `<path class="pt test${dim}" data-id="${p.quote_id}" d="M${x} ${y-r} L${x+r} ${y} L${x} ${y+r} L${x-r} ${y} Z" `+
+             `fill="${col}"${noise?' fill-opacity="0.35"':''} stroke="${ink}" stroke-width="1.6"/>`;
+    } else {
+      const r = noise?3:5;
+      out += `<circle class="pt${dim}" data-id="${p.quote_id}" cx="${x}" cy="${y}" r="${r}" fill="${col}"${noise?' opacity="0.7"':''}/>`;
+    }
+  }
+  // direct cluster labels at centroids (secondary encoding so identity is never color-only)
+  const cents = {};
+  for(const p of shown){
+    if(p.cluster_id<0) continue;
+    (cents[p.cluster_id] ??= {x:0,y:0,n:0});
+    cents[p.cluster_id].x+=sx(p.x); cents[p.cluster_id].y+=sy(p.y); cents[p.cluster_id].n++;
+  }
+  // With 20+ fine-grained themes, labelling every centroid turns the plot into a pile of
+  // overlapping text. Label the biggest ones (they're what the eye goes to first) plus
+  // whichever theme is selected; the Themes panel carries the full colour->name mapping.
+  const TOP_LABELS = 8;
+  const labelled = new Set(
+    Object.entries(cents).sort((a,b)=>b[1].n-a[1].n).slice(0,TOP_LABELS).map(([cid])=>+cid));
+  if(state.activeCluster!=null) labelled.add(state.activeCluster);
+  for(const [cid,c] of Object.entries(cents)){
+    if(!labelled.has(+cid)) continue;
+    const active = state.activeCluster;
+    const isDim = active!=null && +cid!==active;
+    const lab = clusterLabelOf(+cid);
+    out += `<text x="${(c.x/c.n).toFixed(1)}" y="${(c.y/c.n).toFixed(1)}" text-anchor="middle" `+
+      `paint-order="stroke" stroke="${css('--surface')}" stroke-width="3.5" stroke-linejoin="round" `+
+      `fill="${css('--text')}" font-size="12" font-weight="700" style="pointer-events:none;opacity:${isDim?0.25:0.92}">${esc(lab)}</text>`;
+  }
+  svg.innerHTML = out;
+
+  const byId = Object.fromEntries(pts.map(p=>[p.quote_id,p]));
+  svg.querySelectorAll('.pt').forEach(el=>{
+    const p = byId[el.dataset.id];
+    el.addEventListener('mousemove', e=>showTip(e, p, orderMap));
+    el.addEventListener('mouseleave', hideTip);
+    el.addEventListener('click', ()=>{ showDetail(p); });
+  });
+}
+
+function clusterLabelOf(cid){
+  const c = state.data.clusters.find(c=>c.cluster_id===cid);
+  return c ? shortLabel(c) : 'Cluster '+cid;
+}
+
+function showTip(e, p, orderMap){
+  const tip = $('#tip');
+  const col = colorForCluster(p.cluster_id, orderMap);
+  const splitChip = p.split==='test'
+    ? `<span class="chip test">◇ predicted 20%${p.probability!=null?` · p=${p.probability}`:''}</span>`
+    : `<span class="chip train">● training 80%</span>`;
+  tip.innerHTML = `<div class="q">“${esc(p.text)}”</div>
+    <div class="m"><span class="chip" style="border-color:${col};color:${col}">${esc(clusterLabelOf(p.cluster_id))}</span>${splitChip}</div>`;
+  tip.style.opacity = 1;
+  const pad=14; let x=e.clientX+pad, y=e.clientY+pad;
+  const r=tip.getBoundingClientRect();
+  if(x+r.width>innerWidth-8) x=e.clientX-r.width-pad;
+  if(y+r.height>innerHeight-8) y=e.clientY-r.height-pad;
+  tip.style.left=x+'px'; tip.style.top=y+'px';
+}
+function hideTip(){ $('#tip').style.opacity=0; }
+
+function showDetail(p){
+  const stars = p.review_rating!=null ? '★'.repeat(Math.round(p.review_rating))+'☆'.repeat(5-Math.round(p.review_rating)) : '';
+  const HOW = {
+    hdbscan: 'clustered by HDBSCAN (training 80%)',
+    approximate_predict: 'assigned via approximate_predict (held-out 20%)',
+    unclustered: 'unclustered — too far from every cluster',
+  };
+  $('#detail-meta').textContent = HOW[p.assigned_by]
+    || (p.split==='test' ? 'assigned via approximate_predict' : 'training point');
+  $('#detail').innerHTML = `<div class="quote">“${esc(p.text)}”</div>
+    <div class="src">from review ${p.review_url?`<a href="${esc(p.review_url)}" target="_blank" rel="noopener">“${esc(p.review_title||'review')}”</a>`:`“${esc(p.review_title||'review')}”`}
+      ${stars?`<span class="star">${stars}</span>`:''} ${p.review_author?'· '+esc(p.review_author):''}
+      · cluster <b>${esc(clusterLabelOf(p.cluster_id))}</b></div>`;
+}
+
+boot();
+</script>
+</body>
+</html>
