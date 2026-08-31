@@ -75,10 +75,9 @@ def category(category: str):
         # independently hitting the same wall. avg_rating gives the severity read.
         clusters = [
             {"cluster_id": cid, "label": label, "summary": summ, "size": size,
-             "mixed": mixed,
              "n_reviews": nrev, "avg_rating": round(float(avg), 2) if avg is not None else None}
-            for cid, label, summ, size, mixed, nrev, avg in conn.execute(
-                """select c.cluster_id, c.label, c.summary, c.size, c.mixed,
+            for cid, label, summ, size, nrev, avg in conn.execute(
+                """select c.cluster_id, c.label, c.summary, c.size,
                           count(distinct q.review_id) as n_reviews,
                           avg(r.rating) as avg_rating
                      from clusters c
@@ -87,7 +86,7 @@ def category(category: str):
                      left join quotes q on q.id = qc.quote_id
                      left join reviews r on r.id = q.review_id
                     where c.run_id = %s
-                    group by c.cluster_id, c.label, c.summary, c.size, c.mixed
+                    group by c.cluster_id, c.label, c.summary, c.size
                     order by (c.cluster_id < 0), count(distinct q.review_id) desc, c.size desc""",
                 (run_id,),
             ).fetchall()

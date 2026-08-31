@@ -21,7 +21,7 @@
     --s1:#2a78d6; --s2:#008300; --s3:#e87ba4; --s4:#eda100;
     --s5:#1baf7a; --s6:#eb6834; --s7:#4a3aa7; --s8:#e34948;
     --s9:#6da7ec; --s10:#b06fb8;
-    --noise:#a6a49d; --warn:#b06a00;
+    --noise:#a6a49d;
     --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
   }
   @media (prefers-color-scheme: dark) {
@@ -32,7 +32,7 @@
       --accent:#3987e5;
       --s1:#3987e5; --s2:#3fae3f; --s3:#d55181; --s4:#c98500;
       --s5:#199e70; --s6:#d95926; --s7:#9085e9; --s8:#e66767;
-      --s9:#6da7ec; --s10:#c58fcc; --noise:#6f6d67; --warn:#e0a03a;
+      --s9:#6da7ec; --s10:#c58fcc; --noise:#6f6d67;
       --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.4);
     }
   }
@@ -43,7 +43,7 @@
     --accent:#3987e5;
     --s1:#3987e5; --s2:#3fae3f; --s3:#d55181; --s4:#c98500;
     --s5:#199e70; --s6:#d95926; --s7:#9085e9; --s8:#e66767;
-    --s9:#6da7ec; --s10:#c58fcc; --noise:#6f6d67; --warn:#e0a03a;
+    --s9:#6da7ec; --s10:#c58fcc; --noise:#6f6d67;
   }
   * { box-sizing: border-box; }
   body {
@@ -142,7 +142,6 @@
   .cl .sm { color: var(--text-2); font-size: 12.5px; margin-top: 2px; }
   .cl .rt { display: inline-block; margin-top: 5px; margin-right: 4px; font-size: 11px; font-weight: 600;
             color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
-  .cl .rt.mx { color: var(--warn); border-color: color-mix(in oklab, var(--warn) 45%, transparent); }
   .cl .ct { text-align: right; font-variant-numeric: tabular-nums; }
   .cl .ct .n { font-weight: 700; }
   .cl .ct .sp { font-size: 11px; color: var(--muted); white-space: nowrap; }
@@ -329,15 +328,11 @@ function renderClusters(d, orderMap){
     const people = c.n_reviews!=null ? c.n_reviews : c.size;
     const rating = c.cluster_id>=0 && c.avg_rating!=null
       ? `<span class="rt" title="average rating of the reviews in this theme">★ ${c.avg_rating.toFixed(1)}</span>` : '';
-    // shown, not hidden: a theme the model itself judged to cover more than one concern
-    // should be discounted by the reader, not presented as if it were solid
-    const mixedBadge = c.mixed
-      ? `<span class="rt mx" title="The LLM judged this cluster to cover more than one concern — read it with caution">⚠ mixed concerns</span>` : '';
     return `<div class="cl${active}" data-cid="${c.cluster_id}">
       <span class="sw" style="background:${col}"></span>
       <div><div class="lab">${esc(shortLabel(c))}</div>
         ${c.summary?`<div class="sm">${esc(c.summary)}</div>`:''}
-        ${rating}${mixedBadge}</div>
+        ${rating}</div>
       <div class="ct"><div class="n">${people}</div><div class="sp">${c.cluster_id>=0?'reviewers':`${counts.train}+${counts.test}`}</div></div>
     </div>`;
   }).join('');

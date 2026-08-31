@@ -129,7 +129,7 @@ serves both modes, with no build step and no duplicated frontend.
 | `reviews` | one row per collected G2 review (like/dislike/problems text, rating, provenance) |
 | `quotes` | LLM-extracted quotes, category, and 384-d `embedding` (pgvector) |
 | `cluster_runs` | one run per category — HDBSCAN params + metrics + saved model path |
-| `clusters` | per-cluster label, summary, size, `mixed` flag (`cluster_id = -1` is noise) |
+| `clusters` | per-cluster label, summary, size (`cluster_id = -1` is noise) |
 | `quote_clusters` | each quote's cluster, `split` (`train`/`test`), `assigned_by`, probability, and 2-D x/y |
 
 The saved HDBSCAN models live in `models/<category>.joblib`
@@ -153,7 +153,7 @@ here: coverage collapses and the themes fragment into near-duplicates.
 
 | | with PCA (current) | on raw 384-d |
 |---|---|---|
-| pain points | 22 themes, 39% unclustered | 67 themes, 54% unclustered |
+| pain points | 17 themes, 41% unclustered | 67 themes, 54% unclustered |
 | praise | 28 themes, 38% unclustered | 74 themes, 57% unclustered |
 
 On raw vectors the only way to get coverage down is `min_cluster_size=2`, which produces
@@ -166,7 +166,22 @@ PCA rather than UMAP, because the held-out 20% must be projected with the *same*
 transform: PCA is a stable linear map, so unseen points land where they belong, whereas
 UMAP's `transform()` places them inconsistently and `approximate_predict` then rejects
 most as noise (measured: UMAP reached 95% coverage on the training split but 0-19% on
-held-out points). The component count is swept per category.
+held-out points).
+
+**Both categories reduce to the same 15 components** (`PCA_COMPONENTS`). Sweeping it per
+category made the two categories incomparable for no real gain. Fixing the value and
+letting the rest of the selection run, coherence keeps climbing with dimensionality while
+coverage falls and the theme count balloons, so higher is not simply better:
+
+| components | pain points | praise |
+|---|---|---|
+| 10 | 18 themes, coherence 0.704, 61% covered | 24 themes, 0.710, 62% |
+| **15** | **17 themes, 0.708, 62%** | **28 themes, 0.732, 66%** |
+| 20 | 22 themes, 0.752, 63% | 36 themes, 0.753, 68% |
+| 40 | 30 themes, 0.799, 59% | 44 themes, 0.805, 57% |
+
+15 gives the fewest themes at good coverage. At 40 the coherence is higher, but 30-44
+themes per category is past what anyone reads.
 
 #### `cluster_selection_method` matters more than any parameter here
 
@@ -211,13 +226,7 @@ Two guards keep coherence from running away with it:
   can support ~30 distinct themes while a 100-quote one cannot. A flat cap silently
   collapsed the largest category into a handful of coarse buckets.
 
-The labeling step then asks the LLM to flag any cluster that still covers more than one
-concern. Those are stored (`clusters.mixed`) and shown in the UI as a **⚠ mixed concerns**
-badge rather than quietly repaired. Density clustering still yields the occasional
-grab-bag of unrelated one-off bugs ("PDF import fails" beside "cursor invisible in light
-mode"), and a weak theme the reader can discount is much safer than one that looks solid.
-On the current data ~40% of pain-point themes and ~18% of praise themes carry the badge —
-that is the honest state of the clustering, not a number to hide.
+
 
 ---
 

@@ -111,6 +111,18 @@ SELECTION_TIERS = (
 # skim; the tier ladder still prefers a coarser model whenever one meets the floors.
 MAX_THEMES = 45
 
+# Both categories reduce to the same number of components rather than sweeping one each.
+# Measured across 5-60 components (fixing the value and letting the rest of the selection
+# run), coherence keeps climbing with dimensionality while coverage falls and the theme
+# count balloons — 40 components gives coherence ~0.80 but 30/44 themes at ~58% coverage.
+# 15 is the point with the fewest themes at good coverage:
+#   dims   pain (themes/coh/cov)   praise (themes/coh/cov)
+#     10        18 / 0.704 / 61%        24 / 0.710 / 62%
+#     15        17 / 0.708 / 62%        28 / 0.732 / 66%
+#     20        22 / 0.752 / 63%        36 / 0.753 / 68%
+#     30        19 / 0.758 / 58%        29 / 0.779 / 53%
+PCA_COMPONENTS = 15
+
 
 def cluster_shape(labels):
     """(n_clusters, coverage, largest-cluster share of the clustered points)."""
@@ -173,8 +185,8 @@ def make_clusterer(mcs, ms, eps, method="eom"):
 def sweep(X_train):
     """Sweep the parameter grid and return the selected (reducer, clusterer, params, metrics).
 
-    Clustering runs directly on the full-dimensional embeddings — there is no reduction
-    step, so the vectors HDBSCAN sees are the same ones the quotes were embedded into.
+    The embeddings are PCA-reduced to a fixed PCA_COMPONENTS first — HDBSCAN is a density
+    algorithm and its density estimate degrades badly in the raw 384 dimensions.
 
     Every candidate is fit twice: once on an inner split (to measure how well it accepts
     unseen quotes via approximate_predict) and once on the full 80% (the model actually
@@ -187,52 +199,50 @@ def sweep(X_train):
     n_val = max(4, round(n * 0.25))
     Xv, Xf = X_train[perm[:n_val]], X_train[perm[n_val:]]
 
-    # small min_cluster_size values are included deliberately: specific single-concern
-    # themes ("PDF export loses formatting") are often only a handful of quotes.
     # min_cluster_size starts at 3: a 2-quote "theme" is not a theme, and with the reducer
     # in place coverage no longer depends on allowing them (it did on raw 384-d).
     scaled = {max(3, round(n * f)) for f in (0.02, 0.04, 0.06)}
     mcs_grid = sorted(m for m in ({3, 4, 5, 6, 8, 12} | scaled) if 2 < m <= max(4, len(Xf) // 3))
+
+    # Both reducers use the same component count; the inner one is fit on the inner split
+    # only, so the generalization estimate never sees the data it is scored against.
+    n_comp = min(PCA_COMPONENTS, max(2, len(Xf) - 1))
+    full_red = PCA(n_components=n_comp, random_state=SEED).fit(X_train)
+    Zt = full_red.transform(X_train)
+    inner_red = PCA(n_components=n_comp, random_state=SEED).fit(Xf)
+    Zf, Zv = inner_red.transform(Xf), inner_red.transform(Xv)
+
     cands = []
-    for n_comp in (5, 8, 10, 15, 20):
-        if n_comp >= len(Xf):
-            continue
-        # the reducer is fit on training data only, and the same fitted transform is later
-        # applied to unseen quotes — which is why this is PCA and not UMAP
-        inner_red = PCA(n_components=n_comp, random_state=SEED).fit(Xf)
-        Zf, Zv = inner_red.transform(Xf), inner_red.transform(Xv)
-        full_red = PCA(n_components=n_comp, random_state=SEED).fit(X_train)
-        Zt = full_red.transform(X_train)
-        for method in ("eom", "leaf"):
-            for mcs in mcs_grid:
-                for ms in (1, 3, 5):
-                    if ms > mcs:
-                        continue
-                    for eps in (0.0, 0.15, 0.3, 0.5):
-                        # inner model estimates generalization; full model is the one we
-                        # ship, so both are measured (neither sees the real 20%).
-                        inner_clus = make_clusterer(mcs, ms, eps, method).fit(Zf)
-                        val_lab, _ = hdbscan.approximate_predict(inner_clus, Zv)
-                        val_cov = float((val_lab >= 0).mean())
+    for method in ("eom", "leaf"):
+        for mcs in mcs_grid:
+            for ms in (1, 3, 5):
+                if ms > mcs:
+                    continue
+                for eps in (0.0, 0.15, 0.3, 0.5):
+                    # inner model estimates generalization; full model is the one we ship,
+                    # so both are measured (neither sees the real 20%).
+                    inner_clus = make_clusterer(mcs, ms, eps, method).fit(Zf)
+                    val_lab, _ = hdbscan.approximate_predict(inner_clus, Zv)
+                    val_cov = float((val_lab >= 0).mean())
 
-                        full_clus = make_clusterer(mcs, ms, eps, method).fit(Zt)
-                        n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
-                        # coherence is always measured in the original embedding space, so
-                        # candidates using different component counts stay comparable
-                        coh = coherence(X_train, full_clus.labels_)
+                    full_clus = make_clusterer(mcs, ms, eps, method).fit(Zt)
+                    n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
+                    # coherence is measured in the original 384-d space, not the reduced
+                    # one, so it reflects what a reader would judge
+                    coh = coherence(X_train, full_clus.labels_)
 
-                        cands.append({
-                            "n_components": n_comp,
-                            "min_cluster_size": mcs, "min_samples": ms,
-                            "cluster_selection_epsilon": eps,
-                            "cluster_selection_method": method,
-                            "n_clusters": n_clusters,
-                            "clustered_fraction": round(fit_cov, 3),
-                            "inner_val_coverage": round(val_cov, 3),
-                            "largest_share": round(share, 3),
-                            "coherence": round(coh, 4),
-                            "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
-                        })
+                    cands.append({
+                        "n_components": n_comp,
+                        "min_cluster_size": mcs, "min_samples": ms,
+                        "cluster_selection_epsilon": eps,
+                        "cluster_selection_method": method,
+                        "n_clusters": n_clusters,
+                        "clustered_fraction": round(fit_cov, 3),
+                        "inner_val_coverage": round(val_cov, 3),
+                        "largest_share": round(share, 3),
+                        "coherence": round(coh, 4),
+                        "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
+                    })
 
     # n/0.8 recovers the full category size from the 80% training split, so the
     # theme-count ceiling reflects the category, not the split.

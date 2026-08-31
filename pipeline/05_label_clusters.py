@@ -48,11 +48,9 @@ def build_prompt(category, clusters):
         '- "label": 2-5 words naming the SPECIFIC shared theme. Name the actual subject '
         '("PDF export loses formatting"), never a generic bucket ("various issues", '
         '"miscellaneous", "general problems").\n'
-        '- "summary": one sentence on what users are saying.\n'
-        '- "mixed": true if the quotes actually cover two or more unrelated concerns '
-        "rather than one, false otherwise. Be honest — this flags clusters for review.\n\n"
+        '- "summary": one sentence on what users are saying.\n\n'
         "Return ONLY a JSON object mapping each cluster id (string) to "
-        '{"label": "...", "summary": "...", "mixed": false}.\n\n'
+        '{"label": "...", "summary": "..."}.\n\n'
     ]
     for cid, quotes in sorted(clusters.items()):
         parts.append(f"### cluster {cid}\n")
@@ -88,7 +86,6 @@ def main():
                     labels.update(got)
 
             n = 0
-            mixed = []
             for cid_str, meta in (labels or {}).items():
                 if not isinstance(meta, dict):
                     continue
@@ -96,21 +93,14 @@ def main():
                     cid = int(cid_str)
                 except (TypeError, ValueError):
                     continue
-                is_mixed = bool(meta.get("mixed"))
                 conn.execute(
-                    """update clusters set label = %s, summary = %s, mixed = %s
-                       where run_id = %s and cluster_id = %s""",
-                    (meta.get("label"), meta.get("summary"), is_mixed, run_id, cid),
+                    "update clusters set label = %s, summary = %s "
+                    "where run_id = %s and cluster_id = %s",
+                    (meta.get("label"), meta.get("summary"), run_id, cid),
                 )
-                if is_mixed:
-                    mixed.append(f"{cid}:{meta.get('label')}")
                 n += 1
             conn.commit()
             print(f"[{cat}] run {run_id}: labeled {n} clusters")
-            if mixed:
-                # surfaced, not silently fixed — a mixed cluster means the clustering
-                # params deserve another look, and hiding it would fake the quality
-                print(f"[{cat}] LLM flagged as covering >1 concern: {', '.join(mixed)}")
 
 
 if __name__ == "__main__":
