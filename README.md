@@ -39,7 +39,7 @@ Themes are ranked by how many distinct reviewers raised them.*
    the vectors are PCA-reduced (components swept per category) and
    `hdbscan.HDBSCAN(prediction_data=True)` is fit on the 80% and **saved to disk**; the
    held-out 20% is assigned with `hdbscan.approximate_predict` against the reloaded
-   model. Near-duplicate themes are then merged. UMAP gives 2-D coords for the plot.
+   model. UMAP gives 2-D coordinates for the plot (visualization only).
 5. **Label** (`05_label_clusters.py`) — the LLM names each cluster (label + summary).
 6. **Visualize** (`app/`) — per-category scatter of quotes, colored by cluster, with the
    20% predicted points drawn as ring-outlined diamonds; a themes panel ranked by distinct
@@ -153,8 +153,8 @@ here: coverage collapses and the themes fragment into near-duplicates.
 
 | | with PCA (current) | on raw 384-d |
 |---|---|---|
-| pain points | 17 themes, 39% unclustered | 67 themes, 54% unclustered |
-| praise | 18 themes, 38% unclustered | 74 themes, 57% unclustered |
+| pain points | 22 themes, 39% unclustered | 67 themes, 54% unclustered |
+| praise | 28 themes, 38% unclustered | 74 themes, 57% unclustered |
 
 On raw vectors the only way to get coverage down is `min_cluster_size=2`, which produces
 ~70 clusters averaging 3-4 quotes each and splits single concepts several ways — "steep
@@ -167,18 +167,6 @@ transform: PCA is a stable linear map, so unseen points land where they belong, 
 UMAP's `transform()` places them inconsistently and `approximate_predict` then rejects
 most as noise (measured: UMAP reached 95% coverage on the training split but 0-19% on
 held-out points). The component count is swept per category.
-
-#### Near-duplicate themes are merged after clustering
-
-`leaf` selection (and small `min_cluster_size`) buys coverage by splitting concepts apart,
-so one idea can surface as several clusters. After fitting, clusters whose centroids are
-near-identical are merged — `pain_point` went 22 → 17 themes, `praise` 28 → 18. Coverage
-is untouched, since no quote becomes noise; only labels change. The mapping is stored with
-the model, so a quote placed by `approximate_predict` lands in the same merged theme.
-
-The merge backs off its threshold if a merged theme would exceed 25% of the category:
-collapsing an already-coarse clustering can otherwise rebuild the very blob the selection
-constraints exist to prevent.
 
 #### `cluster_selection_method` matters more than any parameter here
 

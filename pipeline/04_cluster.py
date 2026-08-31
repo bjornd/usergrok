@@ -34,7 +34,6 @@ import numpy as np
 import joblib
 import hdbscan
 import umap
-from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.decomposition import PCA
 
 from common import connect, CATEGORIES, ROOT
@@ -250,67 +249,6 @@ def sweep(X_train):
     return reducer, clus, params, win
 
 
-# `leaf` selection buys coverage by splitting concepts apart, so the same idea can surface
-# as several clusters ("Steep learning curve" beside "Steep learning curve for new users",
-# and large-database slowness split three ways). Merging near-identical centroids
-# afterwards fixes that without touching coverage — no quote becomes noise, clusters are
-# only relabelled.
-#
-# 0.60 was chosen by inspecting what merges at each threshold rather than by taste: it
-# combines the Excel/tables, setup-overwhelm and pricing families correctly, while 0.50
-# starts pulling in loosely-related concerns. Averaged centroids in 384-d sit lower than
-# the pairwise similarity of individual paraphrases, which is why the number is well below
-# the ~0.85 two equivalent quotes score.
-MERGE_SIMILARITY = 0.60
-# A merged theme may not exceed this share of the clustered quotes. Set from what it
-# blocked in practice: at 0.25 the guard refused to combine two near-identical themes
-# ("Overwhelming complexity and setup" / "Overwhelming customization and setup", 29%
-# together) while still being nowhere near the runaway blobs it exists to stop.
-MERGE_MAX_SHARE = 0.35
-
-
-def merge_similar_clusters(X_train, train_labels):
-    """Return ({original_label: merged_label}, threshold_used) for near-duplicate themes.
-
-    Centroids come from the training clusters only, so the mapping is part of the saved
-    model and applies unchanged to anything approximate_predict labels later.
-    """
-    ids = sorted({int(l) for l in train_labels if l >= 0})
-    if len(ids) < 2:
-        return {c: c for c in ids}, MERGE_SIMILARITY
-    cents = []
-    for c in ids:
-        v = X_train[train_labels == c].mean(axis=0)
-        cents.append(v / max(np.linalg.norm(v), 1e-12))
-    Z = linkage(np.array(cents), method="average", metric="cosine")
-    sizes = {c: int((train_labels == c).sum()) for c in ids}
-    total = sum(sizes.values())
-    # Back the threshold off until no merged theme dominates. Merging a small number of
-    # already-coarse clusters can otherwise undo the thing the clustering worked for:
-    # praise once went 8 themes -> 3, one of them holding most of the category.
-    groups, used = None, 1.01
-    for thresh in (MERGE_SIMILARITY, 0.7, 0.8, 0.9, 1.01):
-        g = fcluster(Z, t=1 - thresh, criterion="distance")
-        merged = {}
-        for c, gg in zip(ids, g):
-            merged[gg] = merged.get(gg, 0) + sizes[c]
-        if max(merged.values()) / total <= MERGE_MAX_SHARE:
-            groups, used = g, thresh
-            break
-    if groups is None:
-        groups = np.arange(len(ids))
-    # renumber the surviving groups to a contiguous 0..k-1, largest first
-    order = {}
-    for g in sorted(set(groups), key=lambda g: -sum(
-            int((train_labels == c).sum()) for c, gg in zip(ids, groups) if gg == g)):
-        order[g] = len(order)
-    return {c: order[g] for c, g in zip(ids, groups)}, used
-
-
-def apply_merge(labels, mapping):
-    return np.array([mapping.get(int(l), -1) if l >= 0 else -1 for l in labels], dtype=int)
-
-
 def viz_coords(X_all):
     """2-D projection for the scatter plot (visualization only, not used for clustering)."""
     n = len(X_all)
@@ -336,28 +274,17 @@ def run_category(conn, category):
 
     # reducer + clusterer are fit on the 80% ONLY
     reducer, clus, params, metrics = sweep(X_train)
-    Z_train = reducer.transform(X_train)
     print(f"[{category}] best params={params} -> {metrics}")
-
-    # near-duplicate themes are collapsed after fitting; the mapping belongs to the model,
-    # so it is computed here and saved with it (coverage is untouched — only labels change)
-    merge_map, merge_thresh = merge_similar_clusters(X_train, clus.labels_.astype(int))
-    n_before = len({int(l) for l in clus.labels_ if l >= 0})
-    n_after = len(set(merge_map.values()))
-    print(f"[{category}] merged {n_before} -> {n_after} themes "
-          f"(centroid similarity >= {merge_thresh})")
 
     # persist the fitted model bundle
     model_path = MODELS_DIR / f"{category}.joblib"
     joblib.dump({"reducer": reducer, "clusterer": clus,
-                 "train_quote_ids": ids_train.tolist(),
-                 "params": params, "merge_map": merge_map}, model_path)
+                 "train_quote_ids": ids_train.tolist(), "params": params}, model_path)
 
     # self-check: reload and approximate_predict a known train point
     bundle = joblib.load(model_path)
-    chk_raw, _ = hdbscan.approximate_predict(
+    chk_label, _ = hdbscan.approximate_predict(
         bundle["clusterer"], bundle["reducer"].transform(X_train[:1]))
-    chk_label = apply_merge(chk_raw, bundle["merge_map"])
     print(f"[{category}] reload self-check ok (train point -> theme {int(chk_label[0])})")
 
     # assign the held-out 20% via approximate_predict, in the train-fit PCA space
@@ -375,10 +302,6 @@ def run_category(conn, category):
     train_labels = clus.labels_.astype(int)
     train_probs = clus.probabilities_.astype(float)
 
-    # apply the saved mapping to both splits, so a predicted quote and a training quote
-    # in the same theme get the same id
-    train_labels = apply_merge(train_labels, merge_map)
-    test_labels = apply_merge(test_labels, merge_map) if len(test_labels) else test_labels
     # Quotes HDBSCAN rejects stay rejected. An earlier version attached them to the
     # nearest centroid to drive the "unclustered" count down, but that is the wrong
     # trade: it pulled loosely-related quotes into themes and made them mean less.
