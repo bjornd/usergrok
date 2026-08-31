@@ -9,6 +9,7 @@ import json
 from common import connect, claude_json, CATEGORIES
 
 MAX_QUOTES_PER_CLUSTER = 8
+CLUSTERS_PER_CALL = 20
 
 
 def latest_run(conn, category):
@@ -71,11 +72,20 @@ def main():
             if not clusters:
                 print(f"[{cat}] run {run_id}: no non-noise clusters to label")
                 continue
-            try:
-                labels = claude_json(build_prompt(cat, clusters))
-            except Exception as e:
-                print(f"[{cat}] labeling failed: {e}")
-                continue
+            # Batch the clusters: a fine-grained run can produce 70+ clusters, and asking
+            # for all of them in one prompt makes a request large enough to time out or
+            # come back truncated. Chunks also fail independently.
+            items = sorted(clusters.items())
+            labels = {}
+            for i in range(0, len(items), CLUSTERS_PER_CALL):
+                chunk = dict(items[i:i + CLUSTERS_PER_CALL])
+                try:
+                    got = claude_json(build_prompt(cat, chunk))
+                except Exception as e:
+                    print(f"[{cat}] chunk {i // CLUSTERS_PER_CALL + 1} failed: {e}")
+                    continue
+                if isinstance(got, dict):
+                    labels.update(got)
 
             n = 0
             mixed = []

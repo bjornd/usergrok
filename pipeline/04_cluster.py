@@ -34,6 +34,8 @@ import numpy as np
 import joblib
 import hdbscan
 import umap
+from scipy.cluster.hierarchy import linkage, fcluster
+from sklearn.decomposition import PCA
 
 from common import connect, CATEGORIES, ROOT
 
@@ -96,11 +98,19 @@ def split_80_20(n):
 # promote a blob instead. Coherence then picks the winner inside the surviving set.
 SELECTION_TIERS = (
     # (min_clusters, divisor, max_share_of_largest, min_train_coverage, min_val_coverage)
-    (8, 12, 0.30, 0.25, 0.10),
-    (6, 10, 0.40, 0.15, 0.05),
-    (4, 8, 0.55, 0.00, 0.00),
+    # The val floor does real work: the most coherent models are often the worst at
+    # placing unseen quotes, and the reported unclustered share covers the held-out 20%
+    # too, so a model that rejects new points drags the whole number up.
+    (8, 18, 0.30, 0.60, 0.40),
+    (6, 14, 0.40, 0.50, 0.35),
+    (4, 10, 0.55, 0.35, 0.25),
     (2, 5, 1.01, 0.00, 0.00),
 )
+
+# Upper bound on the theme ceiling. Reaching ~50% coverage on raw 384-d requires many
+# small themes (~3-4 quotes each), so the cap has to be well above the ~30 a reader would
+# skim; the tier ladder still prefers a coarser model whenever one meets the floors.
+MAX_THEMES = 45
 
 
 def cluster_shape(labels):
@@ -133,7 +143,7 @@ def coherence(X, labels):
 def pick_best(cands, n_total):
     """First tier that admits any candidate wins; within it, maximize coherence."""
     for lo, divisor, max_share, min_cov, min_val in SELECTION_TIERS:
-        hi = max(14, min(45, round(n_total / divisor)))
+        hi = max(14, min(MAX_THEMES, round(n_total / divisor)))
         ok = [c for c in cands
               if lo <= c["n_clusters"] <= hi
               and c["largest_share"] <= max_share
@@ -162,7 +172,7 @@ def make_clusterer(mcs, ms, eps, method="eom"):
 
 
 def sweep(X_train):
-    """Sweep the parameter grid and return the selected (clusterer, params, metrics).
+    """Sweep the parameter grid and return the selected (reducer, clusterer, params, metrics).
 
     Clustering runs directly on the full-dimensional embeddings — there is no reduction
     step, so the vectors HDBSCAN sees are the same ones the quotes were embedded into.
@@ -180,48 +190,125 @@ def sweep(X_train):
 
     # small min_cluster_size values are included deliberately: specific single-concern
     # themes ("PDF export loses formatting") are often only a handful of quotes.
+    # min_cluster_size starts at 3: a 2-quote "theme" is not a theme, and with the reducer
+    # in place coverage no longer depends on allowing them (it did on raw 384-d).
     scaled = {max(3, round(n * f)) for f in (0.02, 0.04, 0.06)}
     mcs_grid = sorted(m for m in ({3, 4, 5, 6, 8, 12} | scaled) if 2 < m <= max(4, len(Xf) // 3))
     cands = []
-    for method in ("eom", "leaf"):
-        for mcs in mcs_grid:
-            for ms in (1, 3, 5):
-                if ms > mcs:
-                    continue
-                for eps in (0.0, 0.15, 0.3, 0.5):
-                    # inner model estimates generalization; full model is the one we ship,
-                    # so both are measured for every candidate (neither sees the real 20%).
-                    inner_clus = make_clusterer(mcs, ms, eps, method).fit(Xf)
-                    val_lab, _ = hdbscan.approximate_predict(inner_clus, Xv)
-                    val_cov = float((val_lab >= 0).mean())
+    for n_comp in (5, 8, 10, 15, 20):
+        if n_comp >= len(Xf):
+            continue
+        # the reducer is fit on training data only, and the same fitted transform is later
+        # applied to unseen quotes — which is why this is PCA and not UMAP
+        inner_red = PCA(n_components=n_comp, random_state=SEED).fit(Xf)
+        Zf, Zv = inner_red.transform(Xf), inner_red.transform(Xv)
+        full_red = PCA(n_components=n_comp, random_state=SEED).fit(X_train)
+        Zt = full_red.transform(X_train)
+        for method in ("eom", "leaf"):
+            for mcs in mcs_grid:
+                for ms in (1, 3, 5):
+                    if ms > mcs:
+                        continue
+                    for eps in (0.0, 0.15, 0.3, 0.5):
+                        # inner model estimates generalization; full model is the one we
+                        # ship, so both are measured (neither sees the real 20%).
+                        inner_clus = make_clusterer(mcs, ms, eps, method).fit(Zf)
+                        val_lab, _ = hdbscan.approximate_predict(inner_clus, Zv)
+                        val_cov = float((val_lab >= 0).mean())
 
-                    full_clus = make_clusterer(mcs, ms, eps, method).fit(X_train)
-                    n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
-                    coh = coherence(X_train, full_clus.labels_)
+                        full_clus = make_clusterer(mcs, ms, eps, method).fit(Zt)
+                        n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
+                        # coherence is always measured in the original embedding space, so
+                        # candidates using different component counts stay comparable
+                        coh = coherence(X_train, full_clus.labels_)
 
-                    cands.append({
-                        "min_cluster_size": mcs, "min_samples": ms,
-                        "cluster_selection_epsilon": eps,
-                        "cluster_selection_method": method,
-                        "n_clusters": n_clusters,
-                        "clustered_fraction": round(fit_cov, 3),
-                        "inner_val_coverage": round(val_cov, 3),
-                        "largest_share": round(share, 3),
-                        "coherence": round(coh, 4),
-                        "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
-                    })
+                        cands.append({
+                            "n_components": n_comp,
+                            "min_cluster_size": mcs, "min_samples": ms,
+                            "cluster_selection_epsilon": eps,
+                            "cluster_selection_method": method,
+                            "n_clusters": n_clusters,
+                            "clustered_fraction": round(fit_cov, 3),
+                            "inner_val_coverage": round(val_cov, 3),
+                            "largest_share": round(share, 3),
+                            "coherence": round(coh, 4),
+                            "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
+                        })
 
     # n/0.8 recovers the full category size from the 80% training split, so the
     # theme-count ceiling reflects the category, not the split.
     win = pick_best(cands, round(n / 0.8))
     params = {k: win[k] for k in
-              ("min_cluster_size", "min_samples", "cluster_selection_epsilon",
-               "cluster_selection_method")}
+              ("n_components", "min_cluster_size", "min_samples",
+               "cluster_selection_epsilon", "cluster_selection_method")}
+    params["reducer"] = "pca"
     # refit the winner (deterministic, so this reproduces the evaluated model exactly)
+    reducer = PCA(n_components=params["n_components"], random_state=SEED).fit(X_train)
     clus = make_clusterer(params["min_cluster_size"], params["min_samples"],
                           params["cluster_selection_epsilon"],
-                          params["cluster_selection_method"]).fit(X_train)
-    return clus, params, win
+                          params["cluster_selection_method"]).fit(reducer.transform(X_train))
+    return reducer, clus, params, win
+
+
+# `leaf` selection buys coverage by splitting concepts apart, so the same idea can surface
+# as several clusters ("Steep learning curve" beside "Steep learning curve for new users",
+# and large-database slowness split three ways). Merging near-identical centroids
+# afterwards fixes that without touching coverage — no quote becomes noise, clusters are
+# only relabelled.
+#
+# 0.60 was chosen by inspecting what merges at each threshold rather than by taste: it
+# combines the Excel/tables, setup-overwhelm and pricing families correctly, while 0.50
+# starts pulling in loosely-related concerns. Averaged centroids in 384-d sit lower than
+# the pairwise similarity of individual paraphrases, which is why the number is well below
+# the ~0.85 two equivalent quotes score.
+MERGE_SIMILARITY = 0.60
+# A merged theme may not exceed this share of the clustered quotes. Set from what it
+# blocked in practice: at 0.25 the guard refused to combine two near-identical themes
+# ("Overwhelming complexity and setup" / "Overwhelming customization and setup", 29%
+# together) while still being nowhere near the runaway blobs it exists to stop.
+MERGE_MAX_SHARE = 0.35
+
+
+def merge_similar_clusters(X_train, train_labels):
+    """Return ({original_label: merged_label}, threshold_used) for near-duplicate themes.
+
+    Centroids come from the training clusters only, so the mapping is part of the saved
+    model and applies unchanged to anything approximate_predict labels later.
+    """
+    ids = sorted({int(l) for l in train_labels if l >= 0})
+    if len(ids) < 2:
+        return {c: c for c in ids}, MERGE_SIMILARITY
+    cents = []
+    for c in ids:
+        v = X_train[train_labels == c].mean(axis=0)
+        cents.append(v / max(np.linalg.norm(v), 1e-12))
+    Z = linkage(np.array(cents), method="average", metric="cosine")
+    sizes = {c: int((train_labels == c).sum()) for c in ids}
+    total = sum(sizes.values())
+    # Back the threshold off until no merged theme dominates. Merging a small number of
+    # already-coarse clusters can otherwise undo the thing the clustering worked for:
+    # praise once went 8 themes -> 3, one of them holding most of the category.
+    groups, used = None, 1.01
+    for thresh in (MERGE_SIMILARITY, 0.7, 0.8, 0.9, 1.01):
+        g = fcluster(Z, t=1 - thresh, criterion="distance")
+        merged = {}
+        for c, gg in zip(ids, g):
+            merged[gg] = merged.get(gg, 0) + sizes[c]
+        if max(merged.values()) / total <= MERGE_MAX_SHARE:
+            groups, used = g, thresh
+            break
+    if groups is None:
+        groups = np.arange(len(ids))
+    # renumber the surviving groups to a contiguous 0..k-1, largest first
+    order = {}
+    for g in sorted(set(groups), key=lambda g: -sum(
+            int((train_labels == c).sum()) for c, gg in zip(ids, groups) if gg == g)):
+        order[g] = len(order)
+    return {c: order[g] for c, g in zip(ids, groups)}, used
+
+
+def apply_merge(labels, mapping):
+    return np.array([mapping.get(int(l), -1) if l >= 0 else -1 for l in labels], dtype=int)
 
 
 def viz_coords(X_all):
@@ -247,23 +334,36 @@ def run_category(conn, category):
     ids_train, ids_test = ids[train_i], ids[test_i]
     X_train, X_test = X[train_i], X[test_i]
 
-    # the clusterer is fit on the 80% ONLY
-    clus, params, metrics = sweep(X_train)
+    # reducer + clusterer are fit on the 80% ONLY
+    reducer, clus, params, metrics = sweep(X_train)
+    Z_train = reducer.transform(X_train)
     print(f"[{category}] best params={params} -> {metrics}")
+
+    # near-duplicate themes are collapsed after fitting; the mapping belongs to the model,
+    # so it is computed here and saved with it (coverage is untouched — only labels change)
+    merge_map, merge_thresh = merge_similar_clusters(X_train, clus.labels_.astype(int))
+    n_before = len({int(l) for l in clus.labels_ if l >= 0})
+    n_after = len(set(merge_map.values()))
+    print(f"[{category}] merged {n_before} -> {n_after} themes "
+          f"(centroid similarity >= {merge_thresh})")
 
     # persist the fitted model bundle
     model_path = MODELS_DIR / f"{category}.joblib"
-    joblib.dump({"clusterer": clus, "train_quote_ids": ids_train.tolist(),
-                 "params": params}, model_path)
+    joblib.dump({"reducer": reducer, "clusterer": clus,
+                 "train_quote_ids": ids_train.tolist(),
+                 "params": params, "merge_map": merge_map}, model_path)
 
     # self-check: reload and approximate_predict a known train point
     bundle = joblib.load(model_path)
-    chk_label, _ = hdbscan.approximate_predict(bundle["clusterer"], X_train[:1])
-    print(f"[{category}] reload self-check ok (train point -> cluster {int(chk_label[0])})")
+    chk_raw, _ = hdbscan.approximate_predict(
+        bundle["clusterer"], bundle["reducer"].transform(X_train[:1]))
+    chk_label = apply_merge(chk_raw, bundle["merge_map"])
+    print(f"[{category}] reload self-check ok (train point -> theme {int(chk_label[0])})")
 
-    # assign the held-out 20% via approximate_predict, against the saved model
+    # assign the held-out 20% via approximate_predict, in the train-fit PCA space
     if len(X_test):
-        test_labels, test_strengths = hdbscan.approximate_predict(clus, X_test)
+        test_labels, test_strengths = hdbscan.approximate_predict(
+            clus, reducer.transform(X_test))
         test_labels = test_labels.astype(int)
     else:
         test_labels, test_strengths = np.array([], int), np.array([], float)
@@ -274,6 +374,11 @@ def run_category(conn, category):
 
     train_labels = clus.labels_.astype(int)
     train_probs = clus.probabilities_.astype(float)
+
+    # apply the saved mapping to both splits, so a predicted quote and a training quote
+    # in the same theme get the same id
+    train_labels = apply_merge(train_labels, merge_map)
+    test_labels = apply_merge(test_labels, merge_map) if len(test_labels) else test_labels
     # Quotes HDBSCAN rejects stay rejected. An earlier version attached them to the
     # nearest centroid to drive the "unclustered" count down, but that is the wrong
     # trade: it pulled loosely-related quotes into themes and made them mean less.
@@ -286,7 +391,8 @@ def run_category(conn, category):
     run_metrics = {"n_total": n, "n_train": int(len(ids_train)), "n_test": int(len(ids_test)),
                    "n_clusters": n_clusters, "noise_fraction": round(noise_frac, 3),
                    "coherence": metrics.get("coherence"),
-                   "sweep": metrics, "reducer": None,
+                   "sweep": metrics, "reducer": "pca",
+                   "pca_components": int(reducer.n_components),
                    "embedding_dims": int(X.shape[1])}
 
     with conn.transaction():

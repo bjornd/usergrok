@@ -5,9 +5,8 @@ team can act on: **what to fix first**, and **what users love that's worth doubl
 on**. It is a technical demo, not a production app.
 
 **Pipeline:** G2 reviews → LLM quote extraction → high-dimensional embeddings →
-per-category HDBSCAN clustering on those vectors directly (80% fit + 20%
-`approximate_predict`) → stored in Supabase → visualized in a small FastAPI +
-vanilla-JS web app.
+per-category HDBSCAN clustering (80% fit + 20% `approximate_predict`) → stored in
+Supabase → visualized in a small FastAPI + vanilla-JS web app.
 
 Feedback is split into just two categories, **pain points** and **praise**. An earlier
 version separated "feature request" from "bug report", but that distinction is unstable
@@ -37,9 +36,10 @@ Themes are ranked by how many distinct reviewers raised them.*
 3. **Embed** (`03_embed.py`) — each quote → a 384-d vector (`all-MiniLM-L6-v2`),
    stored in a `pgvector` column.
 4. **Cluster** (`04_cluster.py`) — the core step. Per category: an 80/20 split;
-   `hdbscan.HDBSCAN(prediction_data=True)` is fit on the 80% of **raw 384-d vectors**
-   and **saved to disk**; the held-out 20% is assigned with `hdbscan.approximate_predict`
-   against the reloaded model. UMAP gives 2-D coordinates for the plot (viz only).
+   the vectors are PCA-reduced (components swept per category) and
+   `hdbscan.HDBSCAN(prediction_data=True)` is fit on the 80% and **saved to disk**; the
+   held-out 20% is assigned with `hdbscan.approximate_predict` against the reloaded
+   model. Near-duplicate themes are then merged. UMAP gives 2-D coords for the plot.
 5. **Label** (`05_label_clusters.py`) — the LLM names each cluster (label + summary).
 6. **Visualize** (`app/`) — per-category scatter of quotes, colored by cluster, with the
    20% predicted points drawn as ring-outlined diamonds; a themes panel ranked by distinct
@@ -145,23 +145,40 @@ The saved HDBSCAN models live in `models/<category>.joblib`
 
 The UI encodes all three, so nothing is silently presented as a density-clustered member.
 
-### Clustering runs on the raw embeddings
+### Why PCA, and why the component count is swept
 
-HDBSCAN and `approximate_predict` both operate on the full 384-d vectors, with no
-reduction step in between: the distances that form the themes are distances between the
-embeddings themselves.
+HDBSCAN is a density algorithm, and density estimation degrades badly as dimensionality
+rises. Clustering the raw 384-d embeddings was tried and measured, and it does not work
+here: coverage collapses and the themes fragment into near-duplicates.
 
-That choice has a measured cost, and it is worth being plain about it. Density estimation
-gets harder as dimensionality rises, so many more quotes stay unclustered than when the
-vectors were first projected down — but the themes that do form are tighter:
-
-| | on raw 384-d (current) | with a PCA step (previous) |
+| | with PCA (current) | on raw 384-d |
 |---|---|---|
-| pain points | 32 themes, coherence **0.84**, largest 8%, 63% unclustered | 20 themes, coherence 0.70, largest 17%, 29% unclustered |
-| praise | 31 themes, coherence **0.85**, largest 7%, 73% unclustered | 28 themes, coherence 0.73, largest 15%, 38% unclustered |
+| pain points | 17 themes, 39% unclustered | 67 themes, 54% unclustered |
+| praise | 18 themes, 38% unclustered | 74 themes, 57% unclustered |
 
-Both categories now behave the same way: many small, specific themes with no cluster
-dominating, at the price of leaving most quotes unclustered.
+On raw vectors the only way to get coverage down is `min_cluster_size=2`, which produces
+~70 clusters averaging 3-4 quotes each and splits single concepts several ways — "steep
+learning curve" appeared as four separate themes, large-database slowness as three. The
+reducer is what makes a readable number of themes and a reasonable unclustered share
+achievable at the same time.
+
+PCA rather than UMAP, because the held-out 20% must be projected with the *same* fitted
+transform: PCA is a stable linear map, so unseen points land where they belong, whereas
+UMAP's `transform()` places them inconsistently and `approximate_predict` then rejects
+most as noise (measured: UMAP reached 95% coverage on the training split but 0-19% on
+held-out points). The component count is swept per category.
+
+#### Near-duplicate themes are merged after clustering
+
+`leaf` selection (and small `min_cluster_size`) buys coverage by splitting concepts apart,
+so one idea can surface as several clusters. After fitting, clusters whose centroids are
+near-identical are merged — `pain_point` went 22 → 17 themes, `praise` 28 → 18. Coverage
+is untouched, since no quote becomes noise; only labels change. The mapping is stored with
+the model, so a quote placed by `approximate_predict` lands in the same merged theme.
+
+The merge backs off its threshold if a merged theme would exceed 25% of the category:
+collapsing an already-coarse clustering can otherwise rebuild the very blob the selection
+constraints exist to prevent.
 
 #### `cluster_selection_method` matters more than any parameter here
 
@@ -199,9 +216,9 @@ PDF-export and page-load complaints), which is worse than leaving a few quotes o
 Two guards keep coherence from running away with it:
 
 - a **coverage floor**, so it can't keep a handful of ultra-tight clusters and leave most
-  feedback invisible. It relaxes through tiers; on raw 384-d few candidates reach the top
-  tier, so the lower ones usually decide, but the ladder still prefers a well-spread
-  clustering wherever one exists.
+  feedback invisible, plus a floor on how much of an unseen split `approximate_predict`
+  still places. Both relax through the tiers, so a well-generalizing model wins when one
+  exists without a blob becoming the last option standing.
 - a **theme ceiling that scales with the category** (`n/18`), because a 546-quote category
   can support ~30 distinct themes while a 100-quote one cannot. A flat cap silently
   collapsed the largest category into a handful of coarse buckets.
