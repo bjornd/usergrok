@@ -5,8 +5,9 @@ team can act on: **what to fix first**, and **what users love that's worth doubl
 on**. It is a technical demo, not a production app.
 
 **Pipeline:** G2 reviews → LLM quote extraction → high-dimensional embeddings →
-per-category HDBSCAN clustering (80% fit + 20% `approximate_predict`) → stored in
-Supabase → visualized in a small FastAPI + vanilla-JS web app.
+per-category HDBSCAN clustering on those vectors directly (80% fit + 20%
+`approximate_predict`) → stored in Supabase → visualized in a small FastAPI +
+vanilla-JS web app.
 
 Feedback is split into just two categories, **pain points** and **praise**. An earlier
 version separated "feature request" from "bug report", but that distinction is unstable
@@ -36,9 +37,9 @@ Themes are ranked by how many distinct reviewers raised them.*
 3. **Embed** (`03_embed.py`) — each quote → a 384-d vector (`all-MiniLM-L6-v2`),
    stored in a `pgvector` column.
 4. **Cluster** (`04_cluster.py`) — the core step. Per category: an 80/20 split;
-   `hdbscan.HDBSCAN(prediction_data=True)` is fit on the 80% and **saved to disk**;
-   the held-out 20% is assigned with `hdbscan.approximate_predict` against the
-   reloaded model. UMAP gives 2-D coordinates for the plot.
+   `hdbscan.HDBSCAN(prediction_data=True)` is fit on the 80% of **raw 384-d vectors**
+   and **saved to disk**; the held-out 20% is assigned with `hdbscan.approximate_predict`
+   against the reloaded model. UMAP gives 2-D coordinates for the plot (viz only).
 5. **Label** (`05_label_clusters.py`) — the LLM names each cluster (label + summary).
 6. **Visualize** (`app/`) — per-category scatter of quotes, colored by cluster, with the
    20% predicted points drawn as ring-outlined diamonds; a themes panel ranked by distinct
@@ -132,7 +133,7 @@ serves both modes, with no build step and no duplicated frontend.
 | `quote_clusters` | each quote's cluster, `split` (`train`/`test`), `assigned_by`, probability, and 2-D x/y |
 
 The saved HDBSCAN models live in `models/<category>.joblib`
-(`{reducer, clusterer, train_quote_ids, params}`).
+(`{clusterer, train_quote_ids, params}`).
 
 ### How a quote gets its cluster (`assigned_by`)
 
@@ -144,18 +145,25 @@ The saved HDBSCAN models live in `models/<category>.joblib`
 
 The UI encodes all three, so nothing is silently presented as a density-clustered member.
 
-### Why PCA (and why ~5-10 components)
+### Clustering runs on the raw embeddings
 
-HDBSCAN is a density algorithm, and 384-d embeddings reduced to 20 PCA components were
-still too diffuse — most quotes fell under any density threshold and became noise
-(57% unclustered in the worst category). Two fixes, both measured rather than assumed:
+HDBSCAN and `approximate_predict` both operate on the full 384-d vectors, with no
+reduction step in between: the distances that form the themes are distances between the
+embeddings themselves.
 
-- **Reduce harder** (5-15 components, swept per category).
-- **Keep PCA instead of UMAP.** UMAP produces tighter training clusters, but its
-  `transform()` places *unseen* points inconsistently, so `approximate_predict` rejected
-  them: UMAP scored 95% coverage on the training set but only 0-19% on held-out points,
-  while PCA holds 60-100% on both. A stable linear map matters more here than a
-  prettier training fit.
+That choice has a measured cost, and it is worth being plain about it. Density estimation
+gets harder as dimensionality rises, so many more quotes fall below the threshold and stay
+unclustered than when the vectors were first projected down:
+
+| | on raw 384-d (current) | with a PCA step (previous) |
+|---|---|---|
+| pain points | 27 themes, coherence **0.82**, 56% unclustered | 20 themes, coherence 0.70, 29% unclustered |
+| praise | **3 themes, one holding 97%** | 28 themes, largest 15%, 38% unclustered |
+
+Pain points come out *more* coherent and more granular. Praise does not survive: at no
+parameter setting does raw 384-d yield 8+ themes without one cluster swallowing the
+category, so the selection falls back to a near-single blob. Both numbers come from the
+same selection logic, so they are directly comparable.
 
 ### Selection optimizes coherence, not coverage
 
@@ -175,12 +183,13 @@ PDF-export and page-load complaints), which is worse than leaving a few quotes o
 
 Two guards keep coherence from running away with it:
 
-- a **coverage floor** (60%), so it can't keep a handful of ultra-tight clusters and leave
-  most feedback invisible. It sits at the measured knee: requiring 60% cost 0.02 coherence
-  and *gained* 7 themes; requiring 70% degraded coherence sharply.
-- a **theme ceiling that scales with the category** (`n/18`), because 546 praise quotes
-  support ~30 distinct themes while 100 quotes do not. A flat cap silently collapsed the
-  largest category back into 8 coarse buckets.
+- a **coverage floor**, so it can't keep a handful of ultra-tight clusters and leave most
+  feedback invisible. It relaxes through tiers; on raw 384-d few candidates reach the top
+  tier, so the lower ones usually decide, but the ladder still prefers a well-spread
+  clustering wherever one exists.
+- a **theme ceiling that scales with the category** (`n/18`), because a 546-quote category
+  can support ~30 distinct themes while a 100-quote one cannot. A flat cap silently
+  collapsed the largest category into a handful of coarse buckets.
 
 The labeling step then asks the LLM to flag any cluster that still covers more than one
 concern. Those are stored (`clusters.mixed`) and shown in the UI as a **⚠ mixed concerns**
@@ -197,7 +206,8 @@ that is the honest state of the clustering, not a number to hide.
 - **LLM backend is the `claude` CLI**, so extraction cost/latency depends on your
   Claude Code plan rather than a metered API key.
 - **The 2-D coordinates are for visualization only** (UMAP) — HDBSCAN clusters in the
-  PCA space, not in the projection, so points can look adjacent without sharing a cluster.
+  full 384-d space, not in the projection, so points can look adjacent without sharing a
+  cluster.
 - **Unclustered quotes are expected and are not a defect.** Some feedback really is a
   one-off. An earlier version attached these to their nearest theme to drive the count
   down; that made the themes mean less, so it was removed. A quote HDBSCAN rejects stays

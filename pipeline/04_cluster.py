@@ -2,9 +2,9 @@
 
 For each feedback category:
   1. deterministic 80/20 split of the embedded quotes
-  2. PCA-reduce the 80% and fit hdbscan.HDBSCAN(prediction_data=True), sweeping the
-     parameter grid and keeping the best candidate under the selection constraints
-  3. persist the fitted model (reducer + clusterer + train ids) to models/
+  2. fit hdbscan.HDBSCAN(prediction_data=True) on the 80%, sweeping the parameter grid
+     and keeping the best candidate under the selection constraints
+  3. persist the fitted model (clusterer + train ids) to models/
   4. assign the held-out 20% with hdbscan.approximate_predict (reloaded model)
   5. project all points to 2-D with UMAP for the visualization
   6. write cluster_runs / clusters / quote_clusters
@@ -16,15 +16,14 @@ Candidates are chosen for CLUSTER COHERENCE, not coverage: a theme is only usefu
 product team if its quotes are genuinely about one thing. Quotes HDBSCAN rejects are
 left unclustered rather than attached to a nearest theme.
 
-On the reduction step: HDBSCAN is a density algorithm, and in the original 20-dim PCA
-space the 384-d embeddings were too diffuse — most quotes fell below any density
-threshold and were labelled noise (57% in the worst category). Reducing to ~5-10 dims
-fixes that. PCA is used rather than UMAP because the held-out 20% has to be projected
-with the *same* fitted transform: PCA is a stable linear map, so unseen points land
-where they belong, whereas UMAP's transform() places new points inconsistently and
-approximate_predict then rejects most of them as noise (measured: UMAP reached 95%
-coverage on the training set but only 0-19% on held-out points; PCA holds ~60-100% on
-both). The number of components is swept per category.
+Clustering runs on the full-dimensional embeddings: HDBSCAN and approximate_predict both
+operate on the same 384-d vectors the quotes were embedded into, with no reduction step
+in between. That keeps the pipeline honest about what is being compared — the distances
+driving the clusters are distances between the embeddings themselves.
+
+The trade-off is real and measured: density estimation is harder in high dimensions, so
+more quotes fall below the density threshold and stay unclustered than when the vectors
+were first projected down. Coherence of the themes that do form is not hurt by it.
 """
 from __future__ import annotations
 import json
@@ -35,7 +34,6 @@ import numpy as np
 import joblib
 import hdbscan
 import umap
-from sklearn.decomposition import PCA
 
 from common import connect, CATEGORIES, ROOT
 
@@ -82,10 +80,9 @@ def split_80_20(n):
 #
 # The coverage floor is not a return to optimizing coverage — it rules out the degenerate
 # corner where chasing coherence keeps only a few tiny, ultra-tight clusters and leaves
-# most of the feedback invisible. Measured here, requiring 60% coverage costs almost
-# nothing in coherence (pain points 0.773 -> 0.752) while raising coverage 49% -> 64% and
-# yielding *more* themes (15 -> 22). 70% is where coherence genuinely degrades, so the
-# floor sits at the knee, not past it.
+# most of the feedback invisible. Clustering the raw 384-d vectors means few candidates
+# reach the higher tiers at all, so in practice the lower tiers do most of the work here;
+# the ladder still prefers a well-spread clustering whenever one exists.
 SELECTION_TIERS = (
     (8, 18, 0.30, 0.60),
     (6, 14, 0.40, 0.50),
@@ -94,10 +91,12 @@ SELECTION_TIERS = (
 )
 
 # A model whose clusters are tight but which rejects most unseen quotes is overfit — the
-# held-out 20% would arrive as noise. 0.40 admits the fine-grained, high-coherence models
-# (praise's best sit at 0.43) while still excluding the genuine failures that motivated
-# this floor: UMAP scored 0-19% here.
-MIN_VAL_COVERAGE = 0.40
+# held-out 20% would arrive as noise. Clustering the raw 384-d embeddings lowers what is
+# achievable here: density estimation in high dimensions rejects far more unseen points,
+# and the best-shaped pain-point models sit at ~0.36 val coverage. The floor is set just
+# below that so those models are reachable, while still excluding the outright failures
+# it was introduced for (UMAP scored 0-19%).
+MIN_VAL_COVERAGE = 0.35
 
 
 def cluster_shape(labels):
@@ -113,7 +112,7 @@ def cluster_shape(labels):
 def coherence(X, labels):
     """Mean cosine similarity of each clustered quote to its own cluster centroid.
 
-    Computed in the original embedding space (not the reduced one) so it measures what a
+    Computed in the same 384-d space the clustering runs in, so it measures what a
     reader would judge: are these quotes about the same thing? Weighted by cluster size,
     so one tight two-quote cluster cannot mask a large incoherent one.
     """
@@ -151,7 +150,10 @@ def make_clusterer(mcs, ms, eps):
 
 
 def sweep(X_train):
-    """Sweep the parameter grid and return the selected (reducer, clusterer, params, metrics).
+    """Sweep the parameter grid and return the selected (clusterer, params, metrics).
+
+    Clustering runs directly on the full-dimensional embeddings — there is no reduction
+    step, so the vectors HDBSCAN sees are the same ones the quotes were embedded into.
 
     Every candidate is fit twice: once on an inner split (to measure how well it accepts
     unseen quotes via approximate_predict) and once on the full 80% (the model actually
@@ -169,52 +171,41 @@ def sweep(X_train):
     scaled = {max(3, round(n * f)) for f in (0.02, 0.04, 0.06)}
     mcs_grid = sorted(m for m in ({3, 4, 5, 6, 8, 12} | scaled) if 2 < m <= max(4, len(Xf) // 3))
     cands = []
-    for n_comp in (5, 8, 10, 15):
-        if n_comp >= len(Xf):
-            continue
-        # inner model estimates generalization; full model is the one we actually ship,
-        # so both are measured for every candidate (neither ever sees the real 20%).
-        inner_red = PCA(n_components=n_comp, random_state=SEED).fit(Xf)
-        Zf, Zv = inner_red.transform(Xf), inner_red.transform(Xv)
-        full_red = PCA(n_components=n_comp, random_state=SEED).fit(X_train)
-        Zt = full_red.transform(X_train)
-        for mcs in mcs_grid:
-            for ms in (1, 3, 5):
-                if ms > mcs:
-                    continue
-                for eps in (0.0, 0.15, 0.3, 0.5):
-                    inner_clus = make_clusterer(mcs, ms, eps).fit(Zf)
-                    val_lab, _ = hdbscan.approximate_predict(inner_clus, Zv)
-                    val_cov = float((val_lab >= 0).mean())
+    for mcs in mcs_grid:
+        for ms in (1, 3, 5):
+            if ms > mcs:
+                continue
+            for eps in (0.0, 0.15, 0.3, 0.5):
+                # inner model estimates generalization; full model is the one we ship,
+                # so both are measured for every candidate (neither sees the real 20%).
+                inner_clus = make_clusterer(mcs, ms, eps).fit(Xf)
+                val_lab, _ = hdbscan.approximate_predict(inner_clus, Xv)
+                val_cov = float((val_lab >= 0).mean())
 
-                    full_clus = make_clusterer(mcs, ms, eps).fit(Zt)
-                    n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
-                    # coherence is measured in the original embedding space, on the model
-                    # actually shipped (the one fit on the full 80%)
-                    coh = coherence(X_train, full_clus.labels_)
+                full_clus = make_clusterer(mcs, ms, eps).fit(X_train)
+                n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
+                coh = coherence(X_train, full_clus.labels_)
 
-                    cands.append({
-                        "n_components": n_comp, "min_cluster_size": mcs, "min_samples": ms,
-                        "cluster_selection_epsilon": eps,
-                        "n_clusters": n_clusters,
-                        "clustered_fraction": round(fit_cov, 3),
-                        "inner_val_coverage": round(val_cov, 3),
-                        "largest_share": round(share, 3),
-                        "coherence": round(coh, 4),
-                        "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
-                    })
+                cands.append({
+                    "min_cluster_size": mcs, "min_samples": ms,
+                    "cluster_selection_epsilon": eps,
+                    "n_clusters": n_clusters,
+                    "clustered_fraction": round(fit_cov, 3),
+                    "inner_val_coverage": round(val_cov, 3),
+                    "largest_share": round(share, 3),
+                    "coherence": round(coh, 4),
+                    "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
+                })
 
     # n/0.8 recovers the full category size from the 80% training split, so the
     # theme-count ceiling reflects the category, not the split.
     win = pick_best(cands, round(n / 0.8))
     params = {k: win[k] for k in
-              ("n_components", "min_cluster_size", "min_samples", "cluster_selection_epsilon")}
-    params["reducer"] = "pca"
+              ("min_cluster_size", "min_samples", "cluster_selection_epsilon")}
     # refit the winner (deterministic, so this reproduces the evaluated model exactly)
-    reducer = PCA(n_components=params["n_components"], random_state=SEED).fit(X_train)
     clus = make_clusterer(params["min_cluster_size"], params["min_samples"],
-                          params["cluster_selection_epsilon"]).fit(reducer.transform(X_train))
-    return reducer, clus, params, win
+                          params["cluster_selection_epsilon"]).fit(X_train)
+    return clus, params, win
 
 
 def viz_coords(X_all):
@@ -240,25 +231,23 @@ def run_category(conn, category):
     ids_train, ids_test = ids[train_i], ids[test_i]
     X_train, X_test = X[train_i], X[test_i]
 
-    # reducer + clusterer are fit on the 80% ONLY
-    reducer, clus, params, metrics = sweep(X_train)
+    # the clusterer is fit on the 80% ONLY
+    clus, params, metrics = sweep(X_train)
     print(f"[{category}] best params={params} -> {metrics}")
 
     # persist the fitted model bundle
     model_path = MODELS_DIR / f"{category}.joblib"
-    joblib.dump({"reducer": reducer, "clusterer": clus,
-                 "train_quote_ids": ids_train.tolist(), "params": params}, model_path)
+    joblib.dump({"clusterer": clus, "train_quote_ids": ids_train.tolist(),
+                 "params": params}, model_path)
 
     # self-check: reload and approximate_predict a known train point
     bundle = joblib.load(model_path)
-    chk_label, _ = hdbscan.approximate_predict(
-        bundle["clusterer"], bundle["reducer"].transform(X_train[:1]))
+    chk_label, _ = hdbscan.approximate_predict(bundle["clusterer"], X_train[:1])
     print(f"[{category}] reload self-check ok (train point -> cluster {int(chk_label[0])})")
 
-    # assign the held-out 20% via approximate_predict, in the train-fit PCA space
+    # assign the held-out 20% via approximate_predict, against the saved model
     if len(X_test):
-        Xt_test = reducer.transform(X_test)
-        test_labels, test_strengths = hdbscan.approximate_predict(clus, Xt_test)
+        test_labels, test_strengths = hdbscan.approximate_predict(clus, X_test)
         test_labels = test_labels.astype(int)
     else:
         test_labels, test_strengths = np.array([], int), np.array([], float)
@@ -281,8 +270,8 @@ def run_category(conn, category):
     run_metrics = {"n_total": n, "n_train": int(len(ids_train)), "n_test": int(len(ids_test)),
                    "n_clusters": n_clusters, "noise_fraction": round(noise_frac, 3),
                    "coherence": metrics.get("coherence"),
-                   "sweep": metrics, "reducer": "pca",
-                   "pca_components": int(reducer.n_components)}
+                   "sweep": metrics, "reducer": None,
+                   "embedding_dims": int(X.shape[1])}
 
     with conn.transaction():
         # replace any prior run for this category (demo: keep only the latest)
