@@ -83,20 +83,24 @@ def split_80_20(n):
 # most of the feedback invisible. Clustering the raw 384-d vectors means few candidates
 # reach the higher tiers at all, so in practice the lower tiers do most of the work here;
 # the ladder still prefers a well-spread clustering whenever one exists.
+# Generalization (how much of an unseen split approximate_predict still assigns) is a
+# tier constraint rather than a global floor. As a hard gate it silently forced a whole
+# category into a single blob: every well-shaped praise model sits at 15-19% val
+# coverage, so a 0.35 floor rejected all of them and left only the degenerate
+# high-coverage one. Relaxing it in step with the other constraints keeps the preference
+# for models that generalize without ever making a blob the last option standing.
+# The first tier that admits anything wins, so the tiers are ordered by what actually
+# makes a theme list usable: enough distinct themes, and no cluster swallowing the
+# category. Coverage sits low deliberately — on raw 384-d every well-shaped model leaves
+# a lot of quotes unclustered, and high coverage floors just filter those models out and
+# promote a blob instead. Coherence then picks the winner inside the surviving set.
 SELECTION_TIERS = (
-    (8, 18, 0.30, 0.60),
-    (6, 14, 0.40, 0.50),
-    (4, 10, 0.55, 0.35),
-    (2, 5, 1.01, 0.00),
+    # (min_clusters, divisor, max_share_of_largest, min_train_coverage, min_val_coverage)
+    (8, 12, 0.30, 0.25, 0.10),
+    (6, 10, 0.40, 0.15, 0.05),
+    (4, 8, 0.55, 0.00, 0.00),
+    (2, 5, 1.01, 0.00, 0.00),
 )
-
-# A model whose clusters are tight but which rejects most unseen quotes is overfit — the
-# held-out 20% would arrive as noise. Clustering the raw 384-d embeddings lowers what is
-# achievable here: density estimation in high dimensions rejects far more unseen points,
-# and the best-shaped pain-point models sit at ~0.36 val coverage. The floor is set just
-# below that so those models are reachable, while still excluding the outright failures
-# it was introduced for (UMAP scored 0-19%).
-MIN_VAL_COVERAGE = 0.35
 
 
 def cluster_shape(labels):
@@ -128,25 +132,33 @@ def coherence(X, labels):
 
 def pick_best(cands, n_total):
     """First tier that admits any candidate wins; within it, maximize coherence."""
-    for lo, divisor, max_share, min_cov in SELECTION_TIERS:
+    for lo, divisor, max_share, min_cov, min_val in SELECTION_TIERS:
         hi = max(14, min(45, round(n_total / divisor)))
         ok = [c for c in cands
               if lo <= c["n_clusters"] <= hi
               and c["largest_share"] <= max_share
               and c["clustered_fraction"] >= min_cov
-              and c["inner_val_coverage"] >= MIN_VAL_COVERAGE]
+              and c["inner_val_coverage"] >= min_val]
         if ok:
             return max(ok, key=lambda c: c["coherence"])
     # nothing cleared the bars — fall back to the best generalizing candidate
     return max(cands, key=lambda c: (c["inner_val_coverage"], c["coherence"]))
 
 
-def make_clusterer(mcs, ms, eps):
+def make_clusterer(mcs, ms, eps, method="eom"):
     """cluster_selection_epsilon merges splits closer than eps. Swept rather than fixed:
-    it trades granularity for coverage, and the selection step decides the balance."""
+    it trades granularity for coverage, and the selection step decides the balance.
+
+    cluster_selection_method is swept for the same reason. The default 'eom' (excess of
+    mass) prefers large, stable clusters, which on a semantically homogeneous category
+    collapses everything into one blob — praise produced a single cluster holding 97% of
+    its quotes. 'leaf' takes the leaves of the condensed tree instead, giving many small
+    specific themes (praise: 31 themes, largest 7%). Neither is right for every category,
+    so both are candidates and the selection constraints decide."""
     return hdbscan.HDBSCAN(
         min_cluster_size=mcs, min_samples=ms, metric="euclidean",
-        cluster_selection_epsilon=eps, prediction_data=True)
+        cluster_selection_epsilon=eps, cluster_selection_method=method,
+        prediction_data=True)
 
 
 def sweep(X_train):
@@ -171,40 +183,44 @@ def sweep(X_train):
     scaled = {max(3, round(n * f)) for f in (0.02, 0.04, 0.06)}
     mcs_grid = sorted(m for m in ({3, 4, 5, 6, 8, 12} | scaled) if 2 < m <= max(4, len(Xf) // 3))
     cands = []
-    for mcs in mcs_grid:
-        for ms in (1, 3, 5):
-            if ms > mcs:
-                continue
-            for eps in (0.0, 0.15, 0.3, 0.5):
-                # inner model estimates generalization; full model is the one we ship,
-                # so both are measured for every candidate (neither sees the real 20%).
-                inner_clus = make_clusterer(mcs, ms, eps).fit(Xf)
-                val_lab, _ = hdbscan.approximate_predict(inner_clus, Xv)
-                val_cov = float((val_lab >= 0).mean())
+    for method in ("eom", "leaf"):
+        for mcs in mcs_grid:
+            for ms in (1, 3, 5):
+                if ms > mcs:
+                    continue
+                for eps in (0.0, 0.15, 0.3, 0.5):
+                    # inner model estimates generalization; full model is the one we ship,
+                    # so both are measured for every candidate (neither sees the real 20%).
+                    inner_clus = make_clusterer(mcs, ms, eps, method).fit(Xf)
+                    val_lab, _ = hdbscan.approximate_predict(inner_clus, Xv)
+                    val_cov = float((val_lab >= 0).mean())
 
-                full_clus = make_clusterer(mcs, ms, eps).fit(X_train)
-                n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
-                coh = coherence(X_train, full_clus.labels_)
+                    full_clus = make_clusterer(mcs, ms, eps, method).fit(X_train)
+                    n_clusters, fit_cov, share = cluster_shape(full_clus.labels_)
+                    coh = coherence(X_train, full_clus.labels_)
 
-                cands.append({
-                    "min_cluster_size": mcs, "min_samples": ms,
-                    "cluster_selection_epsilon": eps,
-                    "n_clusters": n_clusters,
-                    "clustered_fraction": round(fit_cov, 3),
-                    "inner_val_coverage": round(val_cov, 3),
-                    "largest_share": round(share, 3),
-                    "coherence": round(coh, 4),
-                    "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
-                })
+                    cands.append({
+                        "min_cluster_size": mcs, "min_samples": ms,
+                        "cluster_selection_epsilon": eps,
+                        "cluster_selection_method": method,
+                        "n_clusters": n_clusters,
+                        "clustered_fraction": round(fit_cov, 3),
+                        "inner_val_coverage": round(val_cov, 3),
+                        "largest_share": round(share, 3),
+                        "coherence": round(coh, 4),
+                        "coverage": round((max(fit_cov, 1e-9) * max(val_cov, 1e-9)) ** 0.5, 4),
+                    })
 
     # n/0.8 recovers the full category size from the 80% training split, so the
     # theme-count ceiling reflects the category, not the split.
     win = pick_best(cands, round(n / 0.8))
     params = {k: win[k] for k in
-              ("min_cluster_size", "min_samples", "cluster_selection_epsilon")}
+              ("min_cluster_size", "min_samples", "cluster_selection_epsilon",
+               "cluster_selection_method")}
     # refit the winner (deterministic, so this reproduces the evaluated model exactly)
     clus = make_clusterer(params["min_cluster_size"], params["min_samples"],
-                          params["cluster_selection_epsilon"]).fit(X_train)
+                          params["cluster_selection_epsilon"],
+                          params["cluster_selection_method"]).fit(X_train)
     return clus, params, win
 
 

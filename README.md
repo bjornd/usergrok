@@ -152,18 +152,33 @@ reduction step in between: the distances that form the themes are distances betw
 embeddings themselves.
 
 That choice has a measured cost, and it is worth being plain about it. Density estimation
-gets harder as dimensionality rises, so many more quotes fall below the threshold and stay
-unclustered than when the vectors were first projected down:
+gets harder as dimensionality rises, so many more quotes stay unclustered than when the
+vectors were first projected down — but the themes that do form are tighter:
 
 | | on raw 384-d (current) | with a PCA step (previous) |
 |---|---|---|
-| pain points | 27 themes, coherence **0.82**, 56% unclustered | 20 themes, coherence 0.70, 29% unclustered |
-| praise | **3 themes, one holding 97%** | 28 themes, largest 15%, 38% unclustered |
+| pain points | 32 themes, coherence **0.84**, largest 8%, 63% unclustered | 20 themes, coherence 0.70, largest 17%, 29% unclustered |
+| praise | 31 themes, coherence **0.85**, largest 7%, 73% unclustered | 28 themes, coherence 0.73, largest 15%, 38% unclustered |
 
-Pain points come out *more* coherent and more granular. Praise does not survive: at no
-parameter setting does raw 384-d yield 8+ themes without one cluster swallowing the
-category, so the selection falls back to a near-single blob. Both numbers come from the
-same selection logic, so they are directly comparable.
+Both categories now behave the same way: many small, specific themes with no cluster
+dominating, at the price of leaving most quotes unclustered.
+
+#### `cluster_selection_method` matters more than any parameter here
+
+HDBSCAN's default `'eom'` (excess of mass) prefers large, stable clusters. On a
+semantically homogeneous category that is fatal: praise collapsed to **3 themes, one
+holding 97% of its quotes**, and no `min_cluster_size` / `min_samples` /
+`cluster_selection_epsilon` combination avoided it. Switching to `'leaf'` — take the
+leaves of the condensed tree instead of the most persistent nodes — produced 31 themes
+with the largest at 7%.
+
+Both methods are in the sweep and the constraints choose, but on this data both
+categories select `'leaf'`.
+
+A second fix was needed alongside it: generalization (the share of an unseen split that
+`approximate_predict` still assigns) used to be a hard global floor. Every well-shaped
+praise model sits at 15-19%, so the floor rejected all of them and left the blob as the
+only survivor. It is now one of the tiered constraints, relaxing in step with the others.
 
 ### Selection optimizes coherence, not coverage
 
